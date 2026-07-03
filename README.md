@@ -26,6 +26,18 @@ Run with your own returns:
 python3 run.py --input monthly_returns.xlsx --config config.yaml --output dashboard.html
 ```
 
+## Documentation
+
+Full documentation is in [docs/](docs/README.md):
+
+- [User Guide](docs/USER_GUIDE.md)
+- [Data And Config Specification](docs/DATA_AND_CONFIG_SPEC.md)
+- [Methodology](docs/METHODOLOGY.md)
+- [Module Reference](docs/MODULE_REFERENCE.md)
+- [Dashboard Guide](docs/DASHBOARD_GUIDE.md)
+- [Operations](docs/OPERATIONS.md)
+- [Model Governance Map](MODEL_GOVERNANCE.md)
+
 ## Input Format
 
 The input is a monthly total-return table in CSV or Excel format. Returns must be
