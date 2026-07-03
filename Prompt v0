@@ -1,0 +1,319 @@
+# Factor Attribution Model — Build Prompt Pack
+
+Delivery target: Python pipeline → single self-contained interactive HTML dashboard (Plotly).
+Run: `python run.py --input monthly_returns.xlsx --config config.yaml --output dashboard.html`
+
+Use these prompts in sequence (Claude Code or similar). Prompt 0 sets context for the whole
+session; paste it first and keep the session alive, or prepend it to each prompt if starting fresh.
+
+---
+
+## Prompt 0 — Project context (paste first, always)
+
+```
+You are building a return-based factor performance attribution model for a long-only
+global equity fund, for internal investment-risk oversight.
+
+Architecture:
+- Python 3.11+, libraries: pandas, numpy, statsmodels, scikit-learn, plotly, pyyaml, openpyxl.
+- Modular package layout:
+    attribution_model/
+        data_loader.py      # load + validate monthly returns
+        factor_builder.py   # raw index returns -> relative factor returns
+        model.py            # staged OLS regression engine
+        attribution.py      # monthly + cumulative factor contributions
+        risk.py             # tracking-error variance decomposition
+        diagnostics.py      # VIF, correlations, rolling betas, residual checks
+        dashboard.py        # render single-file interactive HTML (Plotly)
+        run.py              # CLI entry point orchestrating the pipeline
+        config.yaml         # benchmark, factor list, horizons, tolerances
+- Final deliverable: ONE self-contained HTML file (all Plotly JS + data embedded,
+  no external CDN dependency, works offline on a locked-down corporate machine).
+- Input: one Excel/CSV monthly total-return table:
+  Date | Fund | Benchmark | <market index> | <style indices> | <sector indices> | <country indices>
+- All returns monthly, end-of-month aligned, total return, same currency.
+
+Modelling rules (fixed, do not deviate):
+- Dependent variable: geometric relative return
+  y_t = (1 + r_fund,t) / (1 + r_benchmark,t) - 1
+- Each factor: relative return vs its parent index, x_i,t = r_factorIndex,t - r_parentIndex,t
+- Regression: OLS with Newey-West (HAC) standard errors, monthly data, ~60 observations.
+- Staged estimation for interpretability:
+  Stage 1 market only -> Stage 2 + style -> Stage 3 + industry -> Stage 4 + country.
+  Report incremental R² per stage.
+- Max ~10-12 factors; if VIF > 5 or |correlation| > 0.75, flag and support
+  ridge/lasso fallback via config.
+- Attribution: contribution_i,t = beta_i * x_i,t; residual = actual - fitted;
+  alpha reported separately (annualised).
+- Horizons: trailing 12m, 36m, 60m. Geometric linking is the default reporting basis
+  (arithmetic sum available as secondary); components must reconcile to total
+  compounded relative return within a config tolerance (default 1bp).
+
+Code standards: type hints, docstrings, no hard-coded factor names (everything from
+config.yaml), raise clear errors on bad data, deterministic output.
+
+Confirm you understand, then wait for module instructions.
+```
+
+---
+
+## Prompt 1 — config.yaml + data_loader.py
+
+```
+Build config.yaml and data_loader.py.
+
+config.yaml must define:
+- input file path and sheet name
+- column mapping: fund, benchmark, market index
+- factor blocks: style, industry, country — each factor with
+  {name, index_column, parent_column}
+- horizons: [12, 36, 60]
+- regression: {se_type: newey_west, nw_lags: 3, regularisation: none|ridge|lasso, ridge_alpha}
+- thresholds: {vif_flag: 5, corr_flag: 0.75, reconciliation_tol_bps: 1}
+- attribution: {linking: geometric|arithmetic, alpha_treatment: separate|in_residual}
+
+data_loader.py must:
+1. Load the Excel/CSV, parse Date to month-end timestamps, sort ascending.
+2. Validate: all configured columns present; at least 60 monthly observations
+   (warn, don't fail, if 36-59; fail below 36); no duplicate dates; contiguous
+   monthly calendar (report any gaps).
+3. Data-quality checks with a structured report object:
+   - missing values per column (report location)
+   - stale prices: 3+ identical consecutive returns in any index (flag)
+   - index launch-date limitation: leading NaNs in any factor column (flag,
+     record usable start date per factor)
+   - extreme values: |monthly return| > 25% (flag for review, don't drop)
+4. Return (a) clean DataFrame of decimal returns, (b) DataQualityReport dataclass
+   that the dashboard will later render as a data-audit panel.
+5. Include a small synthetic-data generator (make_synthetic_returns()) producing
+   60 months of plausible correlated returns for all configured columns, so the
+   full pipeline can be tested end-to-end without licensed MSCI data.
+
+Write unit tests (pytest) for the validation logic.
+```
+
+---
+
+## Prompt 2 — factor_builder.py
+
+```
+Build factor_builder.py: transform raw index returns into regression-ready
+relative factor returns.
+
+Requirements:
+1. Dependent variable: Fund_Rel_t = (1 + Fund_t) / (1 + Benchmark_t) - 1.
+2. Market factor: MKT_t = r_market_index,t - r_benchmark,t. If config says the
+   benchmark IS the market index, omit the market factor entirely (support
+   market_factor: null in config).
+3. Every style/industry/country factor: x_i,t = r_index,t - r_parent,t using
+   the parent defined per-factor in config (parents can differ, e.g. sector
+   indices vs MSCI World, country indices vs MSCI World).
+4. Output a tidy factor DataFrame: Date | Fund_Rel | MKT | <factor columns>,
+   restricted to the intersection of usable dates across all factors.
+5. Produce a factor construction audit table (per factor: name, block,
+   index column, parent column, first usable date, n obs, mean, ann. vol) —
+   this feeds a dashboard audit panel and satisfies the governance requirement
+   that every factor is observable and independently sourced.
+6. Compute and store the factor correlation matrix; flag any pair with
+   |corr| > threshold from config.
+
+Unit tests: correct relative-return arithmetic (hand-computed cases), correct
+handling of null market factor, correct date intersection with staggered
+launch dates.
+```
+
+---
+
+## Prompt 3 — model.py (staged regression engine)
+
+```
+Build model.py: the staged regression engine.
+
+Requirements:
+1. Four cumulative stages on the full sample:
+   Stage 1: Fund_Rel ~ const + MKT
+   Stage 2: + style block
+   Stage 3: + industry block
+   Stage 4: + country block (final model)
+   (If market factor is null, Stage 1 is intercept-only or skipped; handle both.)
+2. Estimation: statsmodels OLS with Newey-West HAC covariance (maxlags from config).
+3. For every stage store: betas, HAC t-stats, p-values, R², adjusted R²,
+   residual monthly vol (annualise ×√12), and incremental R² vs previous stage.
+4. Final-model extras:
+   - VIF per factor (flag > config threshold)
+   - tracking error explained: 1 - Var(resid)/Var(Fund_Rel), plus annualised
+     realised TE and annualised residual vol
+   - alpha annualised: (1 + alpha_monthly)^12 - 1
+5. Regularisation fallback: if config regularisation = ridge or lasso,
+   fit sklearn on standardised factors, back-transform coefficients to the
+   original return scale so attribution stays in return space. Document in
+   the output object which estimator produced the final betas.
+6. Rolling stability: optional rolling 36-month OLS on the final spec;
+   store rolling betas per factor; flag any factor whose rolling beta changes
+   sign or moves by more than 2 full-sample standard errors.
+7. Return a single ModelResult object (dataclass) carrying everything above —
+   attribution.py, risk.py and dashboard.py consume only this object.
+
+Unit tests: recover known betas from synthetic data with planted loadings;
+VIF computation vs manual calc; ridge back-transform correctness.
+```
+
+---
+
+## Prompt 4 — attribution.py
+
+```
+Build attribution.py: monthly and cumulative factor attribution.
+
+Requirements:
+1. Monthly contribution per factor: C_i,t = beta_i * x_i,t (final-model betas,
+   full-period, unless rolling mode explicitly configured).
+2. Fitted: yhat_t = alpha + sum_i C_i,t. Specific/residual: y_t - yhat_t + (alpha
+   if alpha_treatment = in_residual). If alpha_treatment = separate, alpha is
+   its own attribution line.
+3. Horizon aggregation for each H in config (12/36/60 months, trailing from the
+   latest date; if fewer months available, use what exists and mark the horizon
+   as partial):
+   - Total relative return: prod(1 + y_t) - 1.
+   - GEOMETRIC LINKING (default): implement a Carino-style log-linking
+     adjustment — scale each monthly contribution by k_t = ln(1+y_t)/y_t
+     normalised by ln(1+Y)/Y over the horizon, so component sums reconcile
+     exactly to the compounded total. Handle y_t = 0 (limit k_t -> 1).
+   - Arithmetic alternative: simple sum of monthly contributions, reported
+     alongside with its reconciliation gap.
+4. Roll factor-level results up into block totals: Market, Style, Industry,
+   Country, Alpha (if separate), Specific — AND keep factor-level detail for
+   expandable dashboard breakdowns (Value/Quality/Momentum/LowVol/Size, each
+   sector, each country).
+5. Reconciliation check: |sum(components) - total relative return| must be
+   within tolerance (bps) from config for the geometric basis; raise a
+   warning object (not an exception) if breached, to surface on the dashboard.
+6. Also output the monthly time series of cumulative relative return vs
+   cumulative fitted return (for the dashboard's "explained vs actual" chart)
+   and a monthly stacked contribution series by block.
+
+Unit tests: Carino linking reconciles exactly on hand-built 3-month examples,
+including a negative-total-return case; block totals equal sum of members.
+```
+
+---
+
+## Prompt 5 — risk.py (tracking-error decomposition)
+
+```
+Build risk.py: variance decomposition of active risk.
+
+Requirements:
+1. Using final-model betas and the sample factor covariance matrix Sigma_F:
+   Var(y) ≈ beta' Sigma_F beta + Var(eps).
+2. Decompose systematic variance into block contributions using the
+   x-sigma-rho / marginal contribution approach:
+   contribution of factor i = beta_i * (Sigma_F beta)_i,
+   summed within each block (Market/Style/Industry/Country). This allocates
+   cross-covariances naturally and sums exactly to systematic variance.
+3. Output table: block | share of tracking error variance (%) | annualised
+   TE contribution — plus Specific share = Var(eps)/Var(y).
+4. Note in docstring: a block can contribute little RETURN but a large share
+   of RISK; the dashboard will show return attribution and risk decomposition
+   side by side for exactly this reason.
+5. Factor-level detail retained for expandable view, same as attribution.
+
+Unit tests: shares sum to 100% within tolerance; single-factor case matches
+beta² * var(x) / var(y).
+```
+
+---
+
+## Prompt 6 — diagnostics.py
+
+```
+Build diagnostics.py: assemble the governance/diagnostics pack from the
+ModelResult and factor data.
+
+Contents (all as tidy DataFrames ready for dashboard rendering):
+1. Coefficient table: factor | block | beta | HAC t-stat | p-value |
+   significance stars | VIF | flags.
+2. Stage R² table: stage | R² | adj R² | incremental R².
+3. Factor correlation matrix with cells flagged where |corr| > threshold.
+4. Rolling 36m beta series per factor + stability flags (sign change,
+   > 2 SE drift).
+5. Residual analysis: residual time series, largest 5 unexplained months
+   (date, actual, fitted, residual) — each labelled "for qualitative review",
+   never auto-labelled as skill.
+6. Data-quality report passthrough from data_loader.
+7. A one-page governance summary dict: n obs, n factors, parsimony check
+   (factors vs 10-12 guideline), estimator used, reconciliation status,
+   TE explained, list of all active flags. This becomes the dashboard's
+   "Model governance" panel.
+```
+
+---
+
+## Prompt 7 — dashboard.py (the HTML deliverable)
+
+```
+Build dashboard.py: render everything into ONE self-contained interactive
+HTML file. This is the primary deliverable.
+
+Technical requirements:
+- Plotly with include_plotlyjs='inline' (fully offline, no CDN).
+- All tables/figures embedded; file opens in any modern browser from a
+  network drive or email attachment.
+- Clean internal-report aesthetic: neutral palette, one accent colour,
+  clear typography, generous white space. Header with fund name, benchmark,
+  data window, run timestamp, config hash (for audit).
+
+Layout (tabbed or anchored sections):
+1. HEADLINE — the sentence: "Over five years the fund outperformed its
+   benchmark by X%; Y% style, Z% sector, A% country, B% market, C% specific/
+   residual" — generated dynamically from results, plus a headline bar chart
+   of block contributions with a 1y / 3y / 5y toggle (Plotly updatemenus or
+   buttons — no server needed).
+2. ATTRIBUTION — main summary table (blocks × horizons) with expandable
+   factor-level detail (style, sector, country sub-tables shown/hidden with
+   a few lines of vanilla JS); geometric basis default, arithmetic shown
+   with reconciliation gap; waterfall chart per horizon.
+3. TIME SERIES — cumulative actual vs fitted relative return; monthly
+   stacked contribution area chart by block; residual bar chart with the
+   5 largest unexplained months annotated.
+4. RISK — TE decomposition donut/bar beside the return attribution so
+   return-vs-risk contrast is visible; TE explained metric.
+5. DIAGNOSTICS — coefficient table with significance and VIF flags
+   (conditional cell highlighting), stage R² progression, correlation
+   heatmap, rolling beta small-multiples with stability flags.
+6. GOVERNANCE & DATA — governance summary panel (all flags in one place),
+   factor construction audit table, data-quality report.
+
+Interactivity rules: everything client-side (Plotly toggles + minimal
+vanilla JS for expand/collapse). No external requests. Dashboard must
+degrade gracefully if optional sections (rolling betas) were not run.
+
+Also build run.py: CLI (argparse) wiring the full pipeline
+load -> build factors -> model -> attribution -> risk -> diagnostics -> dashboard,
+with --input, --config, --output, --synthetic (uses the synthetic generator
+for an end-to-end demo). Print a short console summary and the output path.
+
+Acceptance test: `python run.py --synthetic --output demo.html` produces a
+working dashboard with every section populated.
+```
+
+---
+
+## Prompt 8 — hardening & handover (optional final pass)
+
+```
+Final pass over the whole package:
+1. Run the synthetic end-to-end test; fix any integration issues.
+2. Add a README.md: purpose, input file format spec (with example table),
+   how to configure factors, how to run, how to interpret each dashboard
+   section, and the model's stated limitations (return-based, ~60 obs,
+   explanatory not definitive, residual ≠ skill).
+3. Edge cases: horizon longer than history (partial-horizon labelling),
+   factor with late launch date, benchmark = market index, ridge fallback
+   path, a month where fund return is missing (fail with clear message).
+4. Add a requirements.txt with pinned versions.
+5. Produce a short MODEL_GOVERNANCE.md mapping each spec governance check
+   (benchmark appropriateness, factor rationale, parsimony, multicollinearity,
+   stability, residual review, reconciliation) to where it is implemented
+   and surfaced in the dashboard.
+```
