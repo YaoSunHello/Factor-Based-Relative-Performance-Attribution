@@ -1,0 +1,37 @@
+input:
+  file: monthly_returns.xlsx
+  sheet_name: Returns
+columns:
+  date: Date
+  fund: Fund
+  benchmark: Benchmark
+market_factor:
+  index_column: MSCI_World
+horizons: [12, 36, 60]
+regression:
+  se_type: newey_west
+  nw_lags: 3
+  regularisation: none
+  ridge_alpha: 1.0
+thresholds:
+  vif_flag: 5
+  corr_flag: 0.75
+  reconciliation_tol_bps: 1
+attribution:
+  linking: geometric
+  alpha_treatment: separate
+factors:
+  style:
+    - {name: Value, index_column: MSCI_World_Value, parent_column: MSCI_World}
+    - {name: Quality, index_column: MSCI_World_Quality, parent_column: MSCI_World}
+    - {name: Momentum, index_column: MSCI_World_Momentum, parent_column: MSCI_World}
+    - {name: LowVol, index_column: MSCI_World_MinVol, parent_column: MSCI_World}
+  industry:
+    - {name: Technology, index_column: MSCI_World_IT, parent_column: MSCI_World}
+    - {name: Financials, index_column: MSCI_World_Financials, parent_column: MSCI_World}
+    - {name: HealthCare, index_column: MSCI_World_HealthCare, parent_column: MSCI_World}
+  country:
+    - {name: UnitedStates, index_column: MSCI_USA, parent_column: MSCI_World}
+    - {name: Europe, index_column: MSCI_Europe, parent_column: MSCI_World}
+    - {name: Japan, index_column: MSCI_Japan, parent_column: MSCI_World}
+
